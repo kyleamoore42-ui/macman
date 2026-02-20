@@ -1,0 +1,1067 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover"/>
+  <meta name="theme-color" content="#1C1F1E"/>
+  <meta name="apple-mobile-web-app-capable" content="yes"/>
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
+  <meta name="apple-mobile-web-app-title" content="Macman"/>
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png"/>
+  <link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png"/>
+  <title>Macman</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; -webkit-font-smoothing: antialiased; }
+    html, body, #root { height: 100%; background: #1C1F1E; }
+    body { -webkit-text-size-adjust: 100%; overflow: hidden; }
+    input, select, textarea { font-size: 16px !important; }
+    #root {
+      padding-top: env(safe-area-inset-top);
+      padding-bottom: env(safe-area-inset-bottom);
+      padding-left: env(safe-area-inset-left);
+      padding-right: env(safe-area-inset-right);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+  <script type="text/babel" data-presets="react">
+const { useState, useEffect, useRef, useCallback } = React;
+
+// ── Design tokens ─────────────────────────────────────────────────────────────
+const T = {
+  headerBg:     "#1C1F1E",
+  headerCard:   "#252928",
+  headerBorder: "#323836",
+  bodyBg:       "#F0F0F0",
+  cardBg:       "#FFFFFF",
+  cardBorder:   "#E8E8E8",
+  accent:       "#FF4D00",
+  accentSoft:   "#FFF0EB",
+  accentBorder: "#FFD4C2",
+  protein:      "#00C896",
+  carbs:        "#FFB800",
+  fat:          "#7B61FF",
+  ink:          "#1C1F1E",
+  inkMid:       "#555555",
+  inkLight:     "#999999",
+  inkFaint:     "#CCCCCC",
+  white:        "#FFFFFF",
+  red:          "#FF3B3B",
+};
+
+// ── Shared data ───────────────────────────────────────────────────────────────
+const GOALS = { protein: 150, carbs: 200, fat: 65, calories: 2000 };
+
+// ── USDA FoodData Central API ─────────────────────────────────────────────────
+const USDA_KEY = "WPdSmDm4eQZ967og7lcpUWBQWsRM3UTREE1GKgga";
+
+function getNutrient(nutrients, id) {
+  const n = (nutrients || []).find(x => x.nutrientId === id);
+  return n ? +n.value.toFixed(1) : 0;
+}
+
+function parseUSDAFood(f) {
+  // nutrientId: 1008=calories, 1003=protein, 1005=carbs, 1004=fat
+  const nutrients = f.foodNutrients || [];
+  const per = f.servingSize || 100;
+  const scale = per / 100;
+  const cal  = getNutrient(nutrients, 1008);
+  const prot = getNutrient(nutrients, 1003);
+  const carb = getNutrient(nutrients, 1005);
+  const fat  = getNutrient(nutrients, 1004);
+  return {
+    id:       String(f.fdcId),
+    name:     f.description ? f.description.charAt(0).toUpperCase() + f.description.slice(1).toLowerCase() : "Unknown",
+    brand:    f.brandOwner || f.brandName || (f.dataType === "Foundation" || f.dataType === "SR Legacy" ? "USDA" : "Generic"),
+    per:      Math.round(per),
+    protein:  +(prot * scale).toFixed(1),
+    carbs:    +(carb * scale).toFixed(1),
+    fat:      +(fat  * scale).toFixed(1),
+    calories: Math.round(cal * scale),
+    icon:     "🍽",
+  };
+}
+
+async function searchUSDA(query) {
+  const url = `https://api.nal.usda.gov/fdc/v1/foods/search?api_key=${USDA_KEY}&query=${encodeURIComponent(query)}&pageSize=20&dataType=Foundation,SR%20Legacy,Branded`;
+  const res  = await fetch(url);
+  const data = await res.json();
+  return (data.foods || [])
+    .filter(f => f.foodNutrients && f.foodNutrients.length > 0)
+    .map(parseUSDAFood)
+    .filter(f => f.calories > 0 || f.protein > 0)
+    .slice(0, 12);
+}
+
+async function lookupBarcode(code) {
+  const url = `https://api.nal.usda.gov/fdc/v1/foods/search?api_key=${USDA_KEY}&query=${encodeURIComponent(code)}&pageSize=5`;
+  const res  = await fetch(url);
+  const data = await res.json();
+  const foods = (data.foods || []).filter(f => f.gtinUpc === code || f.upcCode === code);
+  if (foods.length > 0) return parseUSDAFood(foods[0]);
+  return null;
+}
+
+const INITIAL_ENTRIES = {
+  breakfast: [
+    { id:1, food:"Quaker Rolled Oats",    grams:80,  protein:10, carbs:54, fat:6,  calories:300 },
+    { id:2, food:"Kirkland Greek Yogurt", grams:200, protein:19, carbs:8,  fat:0,  calories:115 },
+  ],
+  lunch: [
+    { id:3, food:"Chicken Breast",        grams:150, protein:46, carbs:0,  fat:5,  calories:247 },
+    { id:4, food:"Brown Rice",            grams:120, protein:3,  carbs:34, fat:1,  calories:156 },
+  ],
+  dinner: [],
+  snacks: [{ id:5, food:"Almonds", grams:30, protein:6, carbs:7, fat:15, calories:174 }],
+};
+
+const MEAL_LIST = [
+  { id:"breakfast", label:"Breakfast", icon:"☀️", time:"6–10 AM" },
+  { id:"lunch",     label:"Lunch",     icon:"⚡", time:"11 AM–2 PM" },
+  { id:"dinner",    label:"Dinner",    icon:"🌙", time:"5–9 PM" },
+  { id:"snacks",    label:"Snacks",    icon:"🔥", time:"Anytime" },
+];
+
+const WEEK_DATA = [
+  { day:"Mon", calories:1850, protein:138, carbs:185, fat:58 },
+  { day:"Tue", calories:2100, protein:162, carbs:210, fat:71 },
+  { day:"Wed", calories:1920, protein:145, carbs:195, fat:63 },
+  { day:"Thu", calories:2050, protein:155, carbs:205, fat:68 },
+  { day:"Fri", calories:1780, protein:130, carbs:178, fat:55 },
+  { day:"Sat", calories:2300, protein:170, carbs:240, fat:80 },
+  { day:"Sun", calories:0,    protein:0,   carbs:0,   fat:0,  today:true },
+];
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+function sum(arr, key) { return +arr.reduce((a,e) => a+(e[key]||0), 0).toFixed(1); }
+function allEntries(m) { return Object.values(m).flat(); }
+function avg(arr, key) { const v = arr.filter(d=>d[key]>0); return v.length ? Math.round(v.reduce((a,d)=>a+d[key],0)/v.length) : 0; }
+function lbsToKg(l)    { return +(l*0.453592).toFixed(1); }
+function ftInToCm(f,i) { return Math.round((f*12+i)*2.54); }
+function calcBMR({sex,wKg,hCm,age}) { return sex==="male" ? 10*wKg+6.25*hCm-5*age+5 : 10*wKg+6.25*hCm-5*age-161; }
+function carbsFrom(cals,p,f) { return Math.max(Math.round((cals-p*4-f*9)/4),0); }
+
+// ── Shared UI ─────────────────────────────────────────────────────────────────
+function NoSpin() { return <style>{`input[type=number]::-webkit-inner-spin-button,input[type=number]::-webkit-outer-spin-button{-webkit-appearance:none}`}</style>; }
+
+function MacmanLogo({ size=28 }) {
+  const cx=size/2,cy=size/2,r=size/2-1,mouth=42,avail=360-mouth*2;
+  const slices=[{pct:.38,color:T.protein},{pct:.40,color:T.carbs},{pct:.22,color:T.fat}];
+  function polar(deg){const rad=(deg-90)*Math.PI/180;return[cx+r*Math.cos(rad),cy+r*Math.sin(rad)];}
+  function arc(a1,a2){const[sx,sy]=polar(a1),[ex,ey]=polar(a2);return `M${cx},${cy}L${sx},${sy}A${r},${r} 0 ${a2-a1>180?1:0} 1 ${ex},${ey}Z`;}
+  let cur=mouth;
+  return (
+    <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
+      {slices.map((s,i)=>{const span=s.pct*avail,d=arc(cur,cur+span);cur+=span;return <path key={i} d={d} fill={s.color}/>;} )}
+      <circle cx={cx+r*.22} cy={cy-r*.42} r={size*.075} fill={T.headerBg}/>
+      <circle cx={cx+r*.75} cy={cy} r={size*.07} fill="#FF4D00"/>
+    </svg>
+  );
+}
+
+function Header({ title, subtitle, right }) {
+  return (
+    <div style={{background:T.headerBg}}>
+      <div style={{padding:"8px 18px 14px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+        <div>
+          <div style={{display:"flex",alignItems:"center",gap:8}}>
+            <MacmanLogo size={24}/>
+            <span style={{fontSize:13,fontWeight:600,color:T.inkLight,letterSpacing:"-0.01em"}}>macman</span>
+          </div>
+          <p style={{fontSize:18,fontWeight:600,color:T.white,margin:"2px 0 0",letterSpacing:"-0.03em"}}>{title}</p>
+          {subtitle && <p style={{fontSize:11,fontWeight:400,color:T.inkLight,margin:"2px 0 0"}}>{subtitle}</p>}
+        </div>
+        {right}
+      </div>
+    </div>
+  );
+}
+
+function BottomNav({ active, onNav }) {
+  const tabs=[{id:"today",icon:"◉",label:"Today"},{id:"log",icon:"＋",label:"Log"},{id:"trends",icon:"↗",label:"Trends"},{id:"goals",icon:"◎",label:"Goals"}];
+  return (
+    <div style={{background:T.white,borderTop:`1px solid ${T.cardBorder}`,display:"flex",justifyContent:"space-around",padding:"10px 0 18px"}}>
+      {tabs.map(t=>{
+        const isActive=active===t.id;
+        return (
+          <button key={t.id} onClick={()=>onNav(t.id)} style={{display:"flex",flexDirection:"column",alignItems:"center",gap:3,background:"none",border:"none",cursor:"pointer",padding:"4px 14px"}}>
+            <span style={{fontSize:16,color:isActive?T.accent:T.inkLight}}>{t.icon}</span>
+            <span style={{fontSize:9,fontWeight:isActive?600:400,color:isActive?T.accent:T.inkLight,textTransform:"uppercase",letterSpacing:"0.08em"}}>{t.label}</span>
+            {isActive&&<div style={{width:14,height:2,background:T.accent,borderRadius:2}}/>}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+// ── TODAY screen ──────────────────────────────────────────────────────────────
+function CalorieArc({consumed,goal}) {
+  const pct=Math.min(consumed/goal,1),over=consumed>goal;
+  const size=140,stroke=8,r=(size-stroke)/2,circ=2*Math.PI*r,sweep=240;
+  const dashLen=circ*sweep/360,offset=(1-pct)*dashLen;
+  return (
+    <div style={{position:"relative",width:size,height:size*.76}}>
+      <svg width={size} height={size} style={{position:"absolute",top:0,left:0,transform:"rotate(150deg)",transformOrigin:"center"}}>
+        <circle cx={size/2} cy={size/2} r={r} fill="none" stroke={T.headerBorder} strokeWidth={stroke} strokeDasharray={`${dashLen} ${circ}`} strokeLinecap="round"/>
+        <circle cx={size/2} cy={size/2} r={r} fill="none" stroke={over?T.red:T.accent} strokeWidth={stroke} strokeDasharray={`${dashLen} ${circ}`} strokeDashoffset={offset} strokeLinecap="round" style={{transition:"stroke-dashoffset 0.8s cubic-bezier(.4,0,.2,1)"}}/>
+      </svg>
+      <div style={{position:"absolute",inset:0,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",paddingTop:12}}>
+        <span style={{fontSize:32,fontWeight:300,color:T.white,lineHeight:1,letterSpacing:"-0.04em"}}>{consumed}</span>
+        <span style={{fontSize:10,fontWeight:400,color:T.inkLight,marginTop:3}}>of {goal} kcal</span>
+      </div>
+    </div>
+  );
+}
+
+function MacroPill({label,value,goal,color}) {
+  const pct=Math.min((value/goal)*100,100),over=value>goal,dc=over?T.red:color;
+  const remaining=Math.max(goal-value,0);
+  return (
+    <div style={{flex:1,background:T.headerCard,borderRadius:14,padding:"10px 10px 9px",border:`1px solid ${T.headerBorder}`}}>
+      <span style={{fontSize:9,fontWeight:500,color:T.inkLight,textTransform:"uppercase",letterSpacing:"0.1em"}}>{label}</span>
+      <div style={{margin:"5px 0 4px"}}>
+        <span style={{fontSize:20,fontWeight:300,color:T.white,letterSpacing:"-0.03em",lineHeight:1}}>{value}</span>
+        <span style={{fontSize:10,fontWeight:400,color:T.inkLight,marginLeft:2}}>/{goal}g</span>
+      </div>
+      <div style={{background:T.headerBorder,borderRadius:3,height:2.5,marginBottom:4}}>
+        <div style={{width:`${pct}%`,height:"100%",background:dc,borderRadius:3,transition:"width 0.6s ease"}}/>
+      </div>
+      <div style={{display:"flex",justifyContent:"space-between"}}>
+        <span style={{fontSize:9,fontWeight:500,color:dc}}>{Math.round(pct)}%</span>
+        <span style={{fontSize:9,fontWeight:500,color:over?T.red:T.inkLight}}>{over?`+${value-goal}g over`:`${remaining}g left`}</span>
+      </div>
+    </div>
+  );
+}
+
+function MealRow({meal,entries,expanded,onToggle,onDelete,onAddPress}) {
+  const cals=sum(entries,"calories"),isEmpty=entries.length===0;
+  const p=sum(entries,"protein"),c=sum(entries,"carbs"),f=sum(entries,"fat");
+  const barPct=Math.min((cals/GOALS.calories)*100,100);
+  return (
+    <div style={{background:T.cardBg,borderRadius:16,marginBottom:8,border:`1px solid ${T.cardBorder}`,overflow:"hidden"}}>
+      <button onClick={onToggle} style={{width:"100%",background:"none",border:"none",cursor:"pointer",padding:"12px 14px",display:"flex",alignItems:"center",gap:11,textAlign:"left"}}>
+        <div style={{width:38,height:38,borderRadius:11,background:isEmpty?T.bodyBg:T.accentSoft,display:"flex",alignItems:"center",justifyContent:"center",fontSize:17,flexShrink:0,border:`1px solid ${isEmpty?T.cardBorder:T.accentBorder}`}}>{meal.icon}</div>
+        <div style={{flex:1,minWidth:0}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <span style={{fontSize:14,fontWeight:500,color:T.ink,letterSpacing:"-0.01em"}}>{meal.label}</span>
+            <span style={{fontSize:13,fontWeight:400,color:isEmpty?T.inkFaint:T.accent}}>{isEmpty?"—":`${cals} kcal`}</span>
+          </div>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginTop:2}}>
+            <span style={{fontSize:11,fontWeight:400,color:T.inkLight}}>{meal.time}</span>
+            {!isEmpty&&<div style={{display:"flex",gap:8}}>
+              <span style={{fontSize:10,fontWeight:500,color:T.protein}}>P {p}g</span>
+              <span style={{fontSize:10,fontWeight:500,color:T.carbs}}>C {c}g</span>
+              <span style={{fontSize:10,fontWeight:500,color:T.fat}}>F {f}g</span>
+            </div>}
+          </div>
+        </div>
+        <span style={{fontSize:10,color:T.inkFaint,flexShrink:0}}>{expanded?"▲":"▼"}</span>
+      </button>
+      {!isEmpty&&<div style={{height:2,background:T.bodyBg,margin:"0 14px"}}><div style={{width:`${barPct}%`,height:"100%",background:T.accent,borderRadius:2,transition:"width 0.6s ease"}}/></div>}
+      {expanded&&(
+        <div style={{padding:"8px 12px 12px"}}>
+          {isEmpty?<p style={{fontSize:12,color:T.inkLight,textAlign:"center",padding:"10px 0 4px",margin:0}}>Nothing logged yet</p>:
+            <div style={{marginBottom:6}}>
+              {entries.map((e,i)=>(
+                <div key={e.id} style={{display:"flex",alignItems:"center",gap:10,padding:"9px 2px",borderBottom:i<entries.length-1?`1px solid ${T.cardBorder}`:"none"}}>
+                  <div style={{flex:1,minWidth:0}}>
+                    <div style={{fontSize:13,fontWeight:500,color:T.ink,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{e.food}</div>
+                    <div style={{fontSize:11,color:T.inkLight,marginTop:1}}>
+                      {e.grams}g &nbsp;·&nbsp;<span style={{color:T.protein}}>P {e.protein}g</span>&nbsp;<span style={{color:T.carbs}}>C {e.carbs}g</span>&nbsp;<span style={{color:T.fat}}>F {e.fat}g</span>
+                    </div>
+                  </div>
+                  <span style={{fontSize:12,fontWeight:500,color:T.inkMid,flexShrink:0}}>{e.calories} kcal</span>
+                  <button onClick={()=>onDelete(meal.id,e.id)} style={{background:"#FEE8E8",border:"none",borderRadius:7,width:24,height:24,cursor:"pointer",color:"#E03A3A",fontSize:14,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>×</button>
+                </div>
+              ))}
+            </div>
+          }
+          <button onClick={()=>onAddPress(meal.id)} style={{width:"100%",padding:"9px",borderRadius:10,border:`1.5px dashed ${T.cardBorder}`,background:"none",color:T.accent,fontSize:12,fontWeight:500,cursor:"pointer"}}>+ Add food</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function TodayScreen({meals,setMeals,onNavigateLog}) {
+  const [expanded,setExpanded]=useState({breakfast:true,lunch:false,dinner:false,snacks:false});
+  const all=allEntries(meals);
+  const totals={protein:sum(all,"protein"),carbs:sum(all,"carbs"),fat:sum(all,"fat"),calories:sum(all,"calories")};
+  const remaining=Math.max(GOALS.calories-totals.calories,0);
+  const over=totals.calories>GOALS.calories;
+  const today=new Date().toLocaleDateString("en-US",{weekday:"short",month:"short",day:"numeric"}).toUpperCase();
+  const handleDelete=(mealId,id)=>setMeals(prev=>({...prev,[mealId]:prev[mealId].filter(e=>e.id!==id)}));
+  const toggleMeal=id=>setExpanded(prev=>({...prev,[id]:!prev[id]}));
+  return (
+    <div style={{display:"flex",flexDirection:"column",flex:1,overflow:"hidden"}}>
+
+      {/* Dark header */}
+      <div style={{background:T.headerBg}}>
+        <div style={{padding:"10px 18px 0",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+          <div style={{display:"flex",alignItems:"center",gap:8}}>
+            <MacmanLogo size={26}/>
+            <span style={{fontSize:18,fontWeight:600,color:T.white,letterSpacing:"-0.03em"}}>macman</span>
+          </div>
+          <div style={{display:"flex",alignItems:"center",gap:10}}>
+            <span style={{fontSize:10,fontWeight:400,color:T.inkLight,letterSpacing:"0.07em"}}>{today}</span>
+            <div style={{width:28,height:28,borderRadius:"50%",background:T.accent,display:"flex",alignItems:"center",justifyContent:"center"}}>
+              <span style={{fontSize:11,fontWeight:600,color:T.white}}>J</span>
+            </div>
+          </div>
+        </div>
+        <div style={{display:"flex",alignItems:"center",padding:"10px 18px 0",gap:0}}>
+          <CalorieArc consumed={totals.calories} goal={GOALS.calories}/>
+          <div style={{flex:1,paddingLeft:14}}>
+            <p style={{fontSize:9,fontWeight:500,color:T.inkLight,textTransform:"uppercase",letterSpacing:"0.12em",margin:"0 0 3px"}}>{over?"Over by":"Remaining"}</p>
+            <p style={{fontSize:28,fontWeight:300,color:over?T.red:T.white,margin:"0 0 12px",lineHeight:1,letterSpacing:"-0.04em"}}>
+              {over?totals.calories-GOALS.calories:remaining}<span style={{fontSize:11,fontWeight:400,color:T.inkLight,marginLeft:4}}>kcal</span>
+            </p>
+            <button onClick={onNavigateLog} style={{background:T.accent,border:"none",borderRadius:10,padding:"8px 16px",color:T.white,fontSize:12,fontWeight:500,cursor:"pointer"}}>+ Log Food</button>
+          </div>
+        </div>
+        <div style={{display:"flex",gap:8,padding:"12px 12px 14px"}}>
+          <MacroPill label="Protein" value={totals.protein} goal={GOALS.protein} color={T.protein}/>
+          <MacroPill label="Carbs"   value={totals.carbs}   goal={GOALS.carbs}   color={T.carbs}/>
+          <MacroPill label="Fat"     value={totals.fat}     goal={GOALS.fat}     color={T.fat}/>
+        </div>
+      </div>
+      {/* Body */}
+      <div style={{flex:1,overflowY:"auto",WebkitOverflowScrolling:"touch",padding:"12px 12px 20px",background:T.bodyBg}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8,padding:"0 2px"}}>
+          <span style={{fontSize:10,fontWeight:500,color:T.inkLight,textTransform:"uppercase",letterSpacing:"0.1em"}}>Today's Meals</span>
+          <span style={{fontSize:11,fontWeight:500,color:T.accent}}>{all.length} items</span>
+        </div>
+        {MEAL_LIST.map(meal=>(
+          <MealRow key={meal.id} meal={meal} entries={meals[meal.id]} expanded={expanded[meal.id]}
+            onToggle={()=>toggleMeal(meal.id)} onDelete={handleDelete} onAddPress={onNavigateLog}/>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ── LOG FOOD screen ───────────────────────────────────────────────────────────
+function LogScreen({meals,setMeals}) {
+  const [mode,setMode]=useState("search");
+  const [query,setQuery]=useState("");
+  const [results,setResults]=useState([]);
+  const [searching,setSearching]=useState(false);
+  const [searchErr,setSearchErr]=useState(null);
+  const [selected,setSelected]=useState(null);
+  const [grams,setGrams]=useState(100);
+  const [mealTarget,setMealTarget]=useState("breakfast");
+  const [logged,setLogged]=useState(null);
+  const [scanPhase,setScanPhase]=useState("idle");
+  const [scanProg,setScanProg]=useState(0);
+  const [barcodeInput,setBarcodeInput]=useState("");
+  const debounceRef=useRef(null);
+
+  const DEMO_BARCODES=[
+    {code:"5449000000996",label:"Coca-Cola 330ml",icon:"🥤"},
+    {code:"7622210951137",label:"Oreo Original",icon:"🍪"},
+    {code:"8715700110622",label:"Quaker Oats",icon:"🌾"},
+  ];
+
+  // Debounced search
+  useEffect(()=>{
+    if(query.length<2){setResults([]);return;}
+    clearTimeout(debounceRef.current);
+    debounceRef.current=setTimeout(async()=>{
+      setSearching(true);setSearchErr(null);
+      try{const r=await searchUSDA(query);setResults(r);}
+      catch(e){setSearchErr("Couldn't reach food database. Check your connection.");}
+      finally{setSearching(false);}
+    },600);
+    return()=>clearTimeout(debounceRef.current);
+  },[query]);
+
+  const selectProduct=p=>{setSelected(p);setGrams(p.per||100);setMode("product");};
+  const ratio=selected?grams/(selected.per||100):1;
+  const scaled=selected?{
+    protein:+(selected.protein*ratio).toFixed(1),
+    carbs:+(selected.carbs*ratio).toFixed(1),
+    fat:+(selected.fat*ratio).toFixed(1),
+    calories:+(selected.calories*ratio).toFixed(0),
+  }:{};
+
+  const handleLog=()=>{
+    const entry={id:Date.now(),food:selected.name,grams,...scaled};
+    setMeals(prev=>({...prev,[mealTarget]:[...prev[mealTarget],entry]}));
+    setLogged({...entry,meal:mealTarget});
+  };
+
+  const triggerScan=async(code)=>{
+    setScanPhase("scanning");setScanProg(0);
+    // Animate progress bar while fetching
+    let p=0;
+    const t=setInterval(()=>{p=Math.min(p+8,85);setScanProg(p);},80);
+    try{
+      const prod=await lookupBarcode(code);
+      clearInterval(t);setScanProg(100);
+      setTimeout(()=>{
+        if(prod){selectProduct(prod);}
+        else{setScanPhase("notfound");}
+      },300);
+    }catch(e){clearInterval(t);setScanPhase("notfound");}
+  };
+
+  if(logged){
+    return (
+      <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
+        <Header title="Logged!" subtitle={`Added to ${logged.meal}`}/>
+        <div style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:"32px 24px",background:T.bodyBg}}>
+          <div style={{width:72,height:72,borderRadius:"50%",background:T.accent,display:"flex",alignItems:"center",justifyContent:"center",fontSize:32,marginBottom:20,boxShadow:`0 8px 24px ${T.accent}44`}}>✓</div>
+          <p style={{fontSize:18,fontWeight:600,color:T.ink,margin:"0 0 4px",letterSpacing:"-0.02em"}}>{logged.food}</p>
+          <p style={{fontSize:13,fontWeight:400,color:T.inkLight,margin:"0 0 24px"}}>{logged.grams}g · {logged.calories} kcal</p>
+          <div style={{width:"100%",background:T.cardBg,borderRadius:16,padding:"16px",border:`1px solid ${T.cardBorder}`,marginBottom:24}}>
+            <div style={{display:"flex",justifyContent:"space-around"}}>
+              {[{l:"Protein",v:logged.protein,c:T.protein},{l:"Carbs",v:logged.carbs,c:T.carbs},{l:"Fat",v:logged.fat,c:T.fat}].map(m=>(
+                <div key={m.l} style={{textAlign:"center"}}>
+                  <div style={{fontSize:20,fontWeight:300,color:m.c,letterSpacing:"-0.02em"}}>{m.v}g</div>
+                  <div style={{fontSize:10,color:T.inkLight,textTransform:"uppercase",letterSpacing:"0.06em",marginTop:2}}>{m.l}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+          <button onClick={()=>{setLogged(null);setSelected(null);setQuery("");setMode("search");}} style={{width:"100%",padding:"14px",borderRadius:14,border:"none",background:T.accent,color:T.white,fontSize:14,fontWeight:600,cursor:"pointer",marginBottom:10}}>Log Another</button>
+          <button onClick={()=>{setLogged(null);setSelected(null);setQuery("");setMode("scanner");}} style={{width:"100%",padding:"14px",borderRadius:14,border:`1.5px solid ${T.cardBorder}`,background:"none",color:T.inkMid,fontSize:14,fontWeight:500,cursor:"pointer"}}>Scan Instead</button>
+        </div>
+      </div>
+    );
+  }
+
+  if(mode==="product"&&selected){
+    return (
+      <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
+        <Header title={selected.name} subtitle={selected.brand} right={
+          <button onClick={()=>setMode("search")} style={{background:T.headerCard,border:`1px solid ${T.headerBorder}`,borderRadius:10,color:T.inkLight,fontSize:11,fontWeight:500,padding:"6px 12px",cursor:"pointer"}}>← Back</button>
+        }/>
+        <div style={{flex:1,overflowY:"auto",WebkitOverflowScrolling:"touch",padding:"14px 14px 24px",background:T.bodyBg}}>
+          <div style={{background:T.cardBg,borderRadius:16,padding:"14px 16px",border:`1px solid ${T.cardBorder}`,marginBottom:12}}>
+            <p style={{fontSize:10,fontWeight:500,color:T.inkLight,textTransform:"uppercase",letterSpacing:"0.1em",margin:"0 0 10px"}}>Serving Size</p>
+            <div style={{display:"flex",gap:10,marginBottom:10}}>
+              <div style={{flex:1}}>
+                <label style={{fontSize:10,color:T.inkLight,fontWeight:500}}>Weight (g)</label>
+                <div style={{position:"relative",marginTop:4}}>
+                  <NoSpin/>
+                  <input type="number" value={grams} onChange={e=>setGrams(+e.target.value||0)} onClick={e=>e.target.select()} onFocus={e=>e.target.select()}
+                    style={{width:"100%",padding:"10px 28px 10px 12px",borderRadius:10,border:`1.5px solid ${T.cardBorder}`,fontSize:16,fontWeight:300,color:T.ink,outline:"none",boxSizing:"border-box",background:T.bodyBg,MozAppearance:"textfield"}}/>
+                  <span style={{position:"absolute",right:10,top:"50%",transform:"translateY(-50%)",fontSize:11,color:T.inkLight}}>g</span>
+                </div>
+              </div>
+              <div style={{flex:1}}>
+                <label style={{fontSize:10,color:T.inkLight,fontWeight:500}}>Add to Meal</label>
+                <select value={mealTarget} onChange={e=>setMealTarget(e.target.value)} style={{display:"block",width:"100%",marginTop:4,padding:"10px 12px",borderRadius:10,border:`1.5px solid ${T.cardBorder}`,fontSize:13,fontWeight:500,color:T.ink,background:T.bodyBg,outline:"none",cursor:"pointer"}}>
+                  {MEAL_LIST.map(m=><option key={m.id} value={m.id}>{m.label}</option>)}
+                </select>
+              </div>
+            </div>
+            <div style={{display:"flex",gap:6}}>
+              {[selected.per*.5,selected.per,selected.per*1.5,selected.per*2].map(g=>(
+                <button key={g} onClick={()=>setGrams(Math.round(g))} style={{flex:1,padding:"6px 4px",borderRadius:8,fontSize:11,fontWeight:500,cursor:"pointer",background:grams===Math.round(g)?T.accent:T.bodyBg,color:grams===Math.round(g)?T.white:T.inkMid,border:"none",transition:"all 0.15s"}}>{Math.round(g)}g</button>
+              ))}
+            </div>
+          </div>
+          <div style={{background:T.cardBg,borderRadius:16,padding:"14px 16px",border:`1px solid ${T.cardBorder}`,marginBottom:12}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+              <p style={{fontSize:10,fontWeight:500,color:T.inkLight,textTransform:"uppercase",letterSpacing:"0.1em",margin:0}}>Macros for {grams}g</p>
+              <span style={{fontSize:22,fontWeight:300,color:T.accent,letterSpacing:"-0.03em"}}>{scaled.calories}<span style={{fontSize:11,color:T.inkLight,fontWeight:400,marginLeft:2}}>kcal</span></span>
+            </div>
+            {[{l:"Protein",v:scaled.protein,c:T.protein,max:60},{l:"Carbs",v:scaled.carbs,c:T.carbs,max:100},{l:"Fat",v:scaled.fat,c:T.fat,max:50}].map(m=>(
+              <div key={m.l} style={{display:"flex",alignItems:"center",gap:10,marginBottom:8}}>
+                <span style={{fontSize:11,fontWeight:500,color:T.inkLight,width:48}}>{m.l}</span>
+                <div style={{flex:1,background:T.bodyBg,borderRadius:4,height:5,overflow:"hidden"}}><div style={{width:`${Math.min((m.v/m.max)*100,100)}%`,height:"100%",background:m.c,borderRadius:4,transition:"width 0.4s ease"}}/></div>
+                <span style={{fontSize:12,fontWeight:600,color:m.c,width:36,textAlign:"right"}}>{m.v}g</span>
+              </div>
+            ))}
+          </div>
+          <button onClick={handleLog} style={{width:"100%",padding:"15px",borderRadius:14,border:"none",background:T.accent,color:T.white,fontSize:15,fontWeight:600,cursor:"pointer",boxShadow:`0 6px 20px ${T.accent}33`}}>
+            Add to {MEAL_LIST.find(m=>m.id===mealTarget)?.label}
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
+      <Header title="Log Food" subtitle={mode==="search"?"Search or scan a barcode":"Scan a barcode"} right={
+        mode==="search"
+          ? <button onClick={()=>{setMode("scanner");setScanPhase("idle");}} style={{background:T.headerCard,border:`1px solid ${T.headerBorder}`,borderRadius:10,padding:"7px 12px",cursor:"pointer",display:"flex",flexDirection:"column",alignItems:"center",gap:1}}>
+              <svg width="20" height="16" viewBox="0 0 22 18" fill="none">
+                {[0,3,5,9,11,14,16,20].map((x,i)=><rect key={i} x={x} y="0" width={i%2===0?2:1} height="18" fill={T.protein} rx="0.5"/>)}
+              </svg>
+              <span style={{fontSize:8,color:T.protein,fontWeight:600,letterSpacing:"0.04em"}}>SCAN</span>
+            </button>
+          : <button onClick={()=>setMode("search")} style={{background:T.headerCard,border:`1px solid ${T.headerBorder}`,borderRadius:10,color:T.inkLight,fontSize:11,fontWeight:500,padding:"6px 12px",cursor:"pointer"}}>🔍 Search</button>
+      }/>
+
+      {mode==="search"&&(
+        <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
+          <div style={{background:T.headerBg,padding:"0 14px 14px"}}>
+            <div style={{position:"relative"}}>
+              <span style={{position:"absolute",left:13,top:"50%",transform:"translateY(-50%)",fontSize:14}}>🔍</span>
+              <input value={query} onChange={e=>setQuery(e.target.value)} placeholder="e.g. chicken, Quaker oats…" autoFocus
+                style={{width:"100%",padding:"12px 14px 12px 38px",borderRadius:12,border:`1px solid ${T.headerBorder}`,background:T.headerCard,color:T.white,fontSize:14,fontWeight:400,outline:"none",boxSizing:"border-box"}}
+                onFocus={e=>e.target.style.borderColor=T.accent} onBlur={e=>e.target.style.borderColor=T.headerBorder}/>
+            </div>
+          </div>
+          <div style={{flex:1,overflowY:"auto",WebkitOverflowScrolling:"touch",padding:"12px 14px 20px",background:T.bodyBg}}>
+            {/* Idle state — suggestions */}
+            {query.length<2&&!searching&&(
+              <>
+                <p style={{fontSize:10,fontWeight:500,color:T.inkLight,textTransform:"uppercase",letterSpacing:"0.1em",margin:"0 0 10px"}}>Quick Search</p>
+                {["chicken breast","greek yogurt","oats","salmon","eggs","banana","almonds","brown rice"].map(s=>(
+                  <button key={s} onClick={()=>setQuery(s)} style={{display:"flex",alignItems:"center",gap:10,width:"100%",padding:"11px 12px",background:T.cardBg,border:`1px solid ${T.cardBorder}`,borderRadius:12,marginBottom:7,cursor:"pointer",textAlign:"left"}}>
+                    <span style={{fontSize:14}}>🔍</span>
+                    <span style={{fontSize:13,fontWeight:500,color:T.inkMid,textTransform:"capitalize"}}>{s}</span>
+                  </button>
+                ))}
+              </>
+            )}
+            {/* Loading */}
+            {searching&&(
+              <div style={{textAlign:"center",padding:"40px 20px"}}>
+                <style>{String.raw`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
+                <div style={{width:32,height:32,border:`3px solid ${T.cardBorder}`,borderTop:`3px solid ${T.accent}`,borderRadius:"50%",animation:"spin 0.8s linear infinite",margin:"0 auto 12px"}}/>
+                <p style={{fontSize:13,color:T.inkLight,margin:0}}>Searching food database…</p>
+              </div>
+            )}
+            {/* Error */}
+            {searchErr&&!searching&&(
+              <div style={{background:"#FEE8E8",borderRadius:12,padding:"14px",border:"1px solid #FCA5A5",marginBottom:12}}>
+                <p style={{fontSize:12,color:T.red,margin:0}}>{searchErr}</p>
+              </div>
+            )}
+            {/* Results */}
+            {!searching&&results.length>0&&(
+              <>
+                <p style={{fontSize:10,fontWeight:500,color:T.inkLight,margin:"0 0 10px"}}><span style={{color:T.accent,fontWeight:600}}>{results.length}</span> results from Open Food Facts</p>
+                {results.map(item=>(
+                  <button key={item.id} onClick={()=>selectProduct(item)} style={{display:"flex",alignItems:"center",gap:12,width:"100%",padding:"12px 14px",background:T.cardBg,border:`1px solid ${T.cardBorder}`,borderRadius:14,marginBottom:8,cursor:"pointer",textAlign:"left",transition:"border-color 0.15s"}}
+                    onMouseEnter={e=>e.currentTarget.style.borderColor=T.accent} onMouseLeave={e=>e.currentTarget.style.borderColor=T.cardBorder}>
+                    <span style={{fontSize:22,flexShrink:0}}>{item.icon}</span>
+                    <div style={{flex:1,minWidth:0}}>
+                      <div style={{fontSize:13,fontWeight:500,color:T.ink,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{item.name}</div>
+                      <div style={{fontSize:11,color:T.inkLight,marginTop:1}}>{item.brand}</div>
+                    </div>
+                    <div style={{textAlign:"right",flexShrink:0}}>
+                      <div style={{fontSize:14,fontWeight:300,color:T.accent,letterSpacing:"-0.02em"}}>{item.calories}</div>
+                      <div style={{fontSize:9,color:T.inkLight}}>kcal/{item.per}g</div>
+                    </div>
+                  </button>
+                ))}
+              </>
+            )}
+            {/* No results */}
+            {!searching&&query.length>=2&&results.length===0&&!searchErr&&(
+              <div style={{textAlign:"center",padding:"40px 20px"}}>
+                <p style={{fontSize:14,fontWeight:500,color:T.ink,margin:"0 0 6px"}}>No results for "{query}"</p>
+                <p style={{fontSize:12,color:T.inkLight,margin:"0 0 16px"}}>Try a different spelling or scan the barcode instead.</p>
+                <button onClick={()=>{setMode("scanner");setScanPhase("idle");}} style={{padding:"10px 20px",borderRadius:12,border:"none",background:T.accentSoft,color:T.accent,fontSize:13,fontWeight:600,cursor:"pointer"}}>Try Barcode Scanner</button>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {mode==="scanner"&&(
+        <div style={{flex:1,display:"flex",flexDirection:"column",background:T.bodyBg}}>
+          <div style={{background:T.headerBg,height:200,display:"flex",alignItems:"center",justifyContent:"center",position:"relative",flexShrink:0}}>
+            <style>{`@keyframes scan{0%{top:20%}50%{top:70%}100%{top:20%}}`}</style>
+            <div style={{position:"relative",width:180,height:120}}>
+              {[{top:0,left:0,borderTop:`3px solid ${T.accent}`,borderLeft:`3px solid ${T.accent}`},{top:0,right:0,borderTop:`3px solid ${T.accent}`,borderRight:`3px solid ${T.accent}`},{bottom:0,left:0,borderBottom:`3px solid ${T.accent}`,borderLeft:`3px solid ${T.accent}`},{bottom:0,right:0,borderBottom:`3px solid ${T.accent}`,borderRight:`3px solid ${T.accent}`}].map((s,i)=>(
+                <div key={i} style={{position:"absolute",width:16,height:16,borderRadius:2,...s}}/>
+              ))}
+              <div style={{position:"absolute",left:"8%",right:"8%",height:2,background:`linear-gradient(90deg,transparent,${T.accent},transparent)`,boxShadow:`0 0 8px ${T.accent}`,animation:"scan 2s ease-in-out infinite",borderRadius:2}}/>
+            </div>
+            <p style={{position:"absolute",bottom:10,left:0,right:0,textAlign:"center",fontSize:11,color:T.inkLight,margin:0}}>Point camera at a barcode</p>
+          </div>
+
+          {scanPhase==="scanning"&&(
+            <div style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:"32px",background:T.headerBg}}>
+              <div style={{position:"relative",width:80,height:80,marginBottom:20}}>
+                <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
+                <div style={{position:"absolute",inset:0,border:`3px solid ${T.headerBorder}`,borderTop:`3px solid ${T.accent}`,borderRadius:"50%",animation:"spin 0.8s linear infinite"}}/>
+                <div style={{position:"absolute",inset:0,display:"flex",alignItems:"center",justifyContent:"center",fontSize:22}}>🔍</div>
+              </div>
+              <p style={{fontSize:14,fontWeight:500,color:T.white,margin:"0 0 4px"}}>Scanning…</p>
+              <p style={{fontSize:11,color:T.inkLight,margin:"0 0 20px"}}>Querying Open Food Facts</p>
+              <div style={{width:"100%",background:T.headerBorder,borderRadius:6,height:5,overflow:"hidden"}}>
+                <div style={{width:`${scanProg}%`,height:"100%",background:T.accent,borderRadius:6,transition:"width 0.1s ease"}}/>
+              </div>
+            </div>
+          )}
+
+          {scanPhase==="notfound"&&(
+            <div style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:"32px 24px"}}>
+              <p style={{fontSize:16,fontWeight:500,color:T.ink,margin:"0 0 8px"}}>Product not found</p>
+              <p style={{fontSize:12,color:T.inkLight,textAlign:"center",margin:"0 0 20px"}}>Try searching by name instead.</p>
+              <button onClick={()=>setMode("search")} style={{width:"100%",padding:"14px",borderRadius:14,border:"none",background:T.accent,color:T.white,fontSize:14,fontWeight:600,cursor:"pointer"}}>← Search by Name</button>
+            </div>
+          )}
+
+          {scanPhase==="idle"&&(
+            <div style={{flex:1,overflowY:"auto",WebkitOverflowScrolling:"touch",padding:"14px 14px 20px"}}>
+              <p style={{fontSize:10,fontWeight:500,color:T.inkLight,textTransform:"uppercase",letterSpacing:"0.1em",margin:"0 0 10px"}}>Tap to simulate scan</p>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+                {DEMO_BARCODES.map(b=>(
+                  <button key={b.code} onClick={()=>triggerScan(b.code)} style={{background:T.cardBg,border:`1px solid ${T.cardBorder}`,borderRadius:12,padding:"10px 12px",display:"flex",alignItems:"center",gap:8,cursor:"pointer",textAlign:"left"}}
+                    onMouseEnter={e=>{e.currentTarget.style.borderColor=T.accent;}} onMouseLeave={e=>{e.currentTarget.style.borderColor=T.cardBorder;}}>
+                    <span style={{fontSize:20}}>{b.icon}</span>
+                    <div>
+                      <div style={{fontSize:11,fontWeight:500,color:T.ink}}>{b.label}</div>
+                      <div style={{fontSize:9,color:T.inkLight,fontFamily:"monospace"}}>{b.code}</div>
+                    </div>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── TRENDS screen ─────────────────────────────────────────────────────────────
+function TrendsScreen() {
+  const [metric,setMetric]=useState("calories");
+  const metrics=[{key:"calories",label:"Calories",unit:"kcal",goal:GOALS.calories,color:T.accent},{key:"protein",label:"Protein",unit:"g",goal:GOALS.protein,color:T.protein},{key:"carbs",label:"Carbs",unit:"g",goal:GOALS.carbs,color:T.carbs},{key:"fat",label:"Fat",unit:"g",goal:GOALS.fat,color:T.fat}];
+  const m=metrics.find(x=>x.key===metric);
+  const maxVal=Math.max(...WEEK_DATA.map(d=>d[metric]),m.goal);
+  const weekAvg=avg(WEEK_DATA,metric);
+  const [hovered,setHovered]=useState(null);
+
+  return (
+    <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
+      <Header title="Trends" subtitle="Weekly nutrition overview"/>
+      <div style={{flex:1,overflowY:"auto",WebkitOverflowScrolling:"touch",padding:"14px 14px 24px",background:T.bodyBg}}>
+
+        {/* Metric tabs */}
+        <div style={{display:"flex",gap:6,marginBottom:14}}>
+          {metrics.map(x=>(
+            <button key={x.key} onClick={()=>setMetric(x.key)} style={{flex:1,padding:"8px 4px",borderRadius:10,border:"none",cursor:"pointer",fontSize:10,fontWeight:600,transition:"all 0.2s",background:metric===x.key?x.color:T.cardBg,color:metric===x.key?T.white:T.inkLight,boxShadow:metric===x.key?`0 4px 12px ${x.color}44`:"none"}}>
+              {x.label}
+            </button>
+          ))}
+        </div>
+
+        {/* Bar chart card */}
+        <div style={{background:T.cardBg,borderRadius:18,padding:"16px",marginBottom:12,border:`1px solid ${T.cardBorder}`}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:14}}>
+            <div>
+              <p style={{fontSize:10,fontWeight:500,color:T.inkLight,textTransform:"uppercase",letterSpacing:"0.1em",margin:"0 0 2px"}}>{m.label} · This Week</p>
+              <p style={{fontSize:24,fontWeight:300,color:T.ink,margin:0,letterSpacing:"-0.03em"}}>{weekAvg}<span style={{fontSize:11,color:T.inkLight,marginLeft:3}}>avg/day</span></p>
+            </div>
+            <div style={{textAlign:"right"}}>
+              <p style={{fontSize:9,color:T.inkLight,margin:"0 0 2px",textTransform:"uppercase",letterSpacing:"0.08em"}}>Goal</p>
+              <p style={{fontSize:14,fontWeight:500,color:m.color,margin:0}}>{m.goal} {m.unit}</p>
+            </div>
+          </div>
+
+          <div style={{display:"flex",alignItems:"flex-end",gap:6,height:90,position:"relative"}}>
+            <div style={{position:"absolute",left:0,right:0,bottom:`${(m.goal/maxVal)*100}%`,borderTop:`1.5px dashed ${m.color}`,opacity:0.35,pointerEvents:"none"}}/>
+            {WEEK_DATA.map((d,i)=>{
+              const h=d[metric]>0?(d[metric]/maxVal)*100:0;
+              const over=d[metric]>m.goal;
+              const isToday=d.today;
+              return (
+                <div key={i} style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",gap:4,position:"relative"}}
+                  onMouseEnter={()=>setHovered(i)} onMouseLeave={()=>setHovered(null)}>
+                  {hovered===i&&d[metric]>0&&(
+                    <div style={{position:"absolute",bottom:"calc(100% + 4px)",left:"50%",transform:"translateX(-50%)",background:T.ink,borderRadius:8,padding:"4px 8px",whiteSpace:"nowrap",fontSize:10,fontWeight:600,color:T.white,zIndex:10}}>
+                      {d[metric]}{metric==="calories"?" kcal":"g"}
+                    </div>
+                  )}
+                  <div style={{width:"100%",display:"flex",alignItems:"flex-end",height:78}}>
+                    <div style={{width:"100%",height:isToday?3:`${Math.max(h,3)}%`,background:isToday?T.inkFaint:over?T.red:m.color,borderRadius:"4px 4px 2px 2px",opacity:isToday?.4:1,transition:"height 0.5s cubic-bezier(.4,0,.2,1)"}}/>
+                  </div>
+                  <span style={{fontSize:9,fontWeight:isToday?600:400,color:isToday?T.inkFaint:T.inkLight}}>{isToday?"Now":d.day}</span>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* Stat grid */}
+        <p style={{fontSize:10,fontWeight:500,color:T.inkLight,textTransform:"uppercase",letterSpacing:"0.1em",margin:"0 0 10px"}}>Weekly Averages</p>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:14}}>
+          {metrics.map(x=>{
+            const a=avg(WEEK_DATA,x.key);
+            const p=Math.min((a/x.goal)*100,100);
+            return (
+              <div key={x.key} style={{background:T.cardBg,borderRadius:16,padding:"14px",border:`1px solid ${T.cardBorder}`}}>
+                <div style={{display:"flex",justifyContent:"space-between",marginBottom:8}}>
+                  <span style={{fontSize:10,fontWeight:500,color:T.inkLight,textTransform:"uppercase",letterSpacing:"0.08em"}}>{x.label}</span>
+                  <span style={{fontSize:10,fontWeight:600,color:x.color}}>{Math.round(p)}%</span>
+                </div>
+                <div style={{fontSize:20,fontWeight:300,color:T.ink,marginBottom:8,letterSpacing:"-0.02em"}}>{a}<span style={{fontSize:10,color:T.inkLight,marginLeft:2}}>{x.unit}</span></div>
+                <div style={{background:T.bodyBg,borderRadius:4,height:3}}>
+                  <div style={{width:`${p}%`,height:"100%",background:x.color,borderRadius:4,transition:"width 0.5s ease"}}/>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+
+        {/* Day-by-day */}
+        <p style={{fontSize:10,fontWeight:500,color:T.inkLight,textTransform:"uppercase",letterSpacing:"0.1em",margin:"0 0 10px"}}>Day by Day</p>
+        <div style={{background:T.cardBg,borderRadius:16,border:`1px solid ${T.cardBorder}`,overflow:"hidden"}}>
+          {WEEK_DATA.map((d,i)=>{
+            const val=d[metric];const over=val>m.goal;const isToday=d.today;
+            const p=isToday||val===0?0:Math.min((val/m.goal)*100,100);
+            return (
+              <div key={i} style={{padding:"10px 14px",borderBottom:i<WEEK_DATA.length-1?`1px solid ${T.bodyBg}`:"none",display:"flex",alignItems:"center",gap:12}}>
+                <span style={{fontSize:11,fontWeight:500,color:isToday?T.inkFaint:T.inkMid,width:28}}>{isToday?"—":d.day}</span>
+                <div style={{flex:1,background:T.bodyBg,borderRadius:4,height:5,overflow:"hidden"}}>
+                  <div style={{width:`${p}%`,height:"100%",background:over?T.red:m.color,borderRadius:4,transition:"width 0.5s ease"}}/>
+                </div>
+                <span style={{fontSize:12,fontWeight:400,color:isToday?T.inkFaint:over?T.red:T.ink,width:60,textAlign:"right"}}>{isToday?"Today":`${val}${metric==="calories"?"":""}`}</span>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── GOALS screen ──────────────────────────────────────────────────────────────
+const ACTIVITY={sedentary:{label:"Sedentary",desc:"Little/no exercise",mult:1.2},light:{label:"Lightly active",desc:"1–3 days/week",mult:1.375},moderate:{label:"Moderately active",desc:"3–5 days/week",mult:1.55},active:{label:"Very active",desc:"6–7 days/week",mult:1.725},extra:{label:"Extra active",desc:"Physical job / 2× training",mult:1.9}};
+const GOAL_CONFIGS={lose_fast:{label:"Lose weight (aggressive)",desc:"−1 kg/week",calAdj:-1000,pMult:2.2},lose:{label:"Lose weight",desc:"−0.5 kg/week",calAdj:-500,pMult:2.0},maintain:{label:"Maintain",desc:"Stay at current weight",calAdj:0,pMult:1.8},gain:{label:"Build muscle",desc:"+0.25 kg/week",calAdj:250,pMult:2.2},gain_fast:{label:"Build muscle (aggressive)",desc:"+0.5 kg/week",calAdj:500,pMult:2.4}};
+
+function GoalsScreen() {
+  const [step,setStep]=useState("form");
+  const [unit,setUnit]=useState("imperial");
+  const [sex,setSex]=useState("male");
+  const [age,setAge]=useState(28);
+  const [wLbs,setWLbs]=useState(180);const [wKg,setWKg]=useState(82);
+  const [hFt,setHFt]=useState(5);const [hIn,setHIn]=useState(11);const [hCm,setHCm]=useState(180);
+  const [activity,setActivity]=useState("moderate");
+  const [goalKey,setGoalKey]=useState("maintain");
+  const [macros,setMacros]=useState(null);
+  const [editMode,setEditMode]=useState("pct");
+
+  const getWKg=()=>unit==="imperial"?lbsToKg(wLbs):wKg;
+  const getHCm=()=>unit==="imperial"?ftInToCm(hFt,hIn):hCm;
+
+  const calculate=()=>{
+    const wk=getWKg(),hc=getHCm();
+    const bmr=calcBMR({sex,wKg:wk,hCm:hc,age});
+    const tdee=Math.round(bmr*ACTIVITY[activity].mult);
+    const g=GOAL_CONFIGS[goalKey];
+    const cals=Math.round(Math.max(tdee+g.calAdj,1200));
+    const protein=Math.round(wk*g.pMult);
+    const fat=Math.round((cals*.25)/9);
+    const carbs=carbsFrom(cals,protein,fat);
+    setMacros({calories:cals,protein,fat,carbs,tdee});
+    setStep("results");
+  };
+
+  const handleProteinPct=v=>{const g=Math.max(Math.round((v/100)*macros.calories/4),0);setMacros(p=>({...p,protein:g,carbs:carbsFrom(p.calories,g,p.fat)}));};
+  const handleFatPct=v=>{const g=Math.max(Math.round((v/100)*macros.calories/9),0);setMacros(p=>({...p,fat:g,carbs:carbsFrom(p.calories,p.protein,g)}));};
+  const handleProteinG=v=>setMacros(p=>({...p,protein:Math.max(v,0),carbs:carbsFrom(p.calories,Math.max(v,0),p.fat)}));
+  const handleFatG=v=>setMacros(p=>({...p,fat:Math.max(v,0),carbs:carbsFrom(p.calories,p.protein,Math.max(v,0))}));
+
+  const Seg=({opts,val,onChange})=>(
+    <div style={{display:"flex",background:T.bodyBg,borderRadius:10,padding:3,gap:2}}>
+      {opts.map(o=><button key={o.v} onClick={()=>onChange(o.v)} style={{flex:1,padding:"8px 4px",borderRadius:8,border:"none",cursor:"pointer",fontSize:12,fontWeight:val===o.v?600:400,background:val===o.v?T.cardBg:T.bodyBg,color:val===o.v?T.ink:T.inkLight,boxShadow:val===o.v?"0 1px 4px rgba(0,0,0,0.08)":"none",transition:"all 0.2s"}}>{o.l}</button>)}
+    </div>
+  );
+  const NumInput=({value,onChange,unit:u})=>{
+    const ref=useRef(null);
+    useEffect(()=>{ if(ref.current && document.activeElement!==ref.current) ref.current.value=value; },[value]);
+    return (
+      <div style={{position:"relative"}}>
+        <NoSpin/>
+        <input ref={ref} type="number" defaultValue={value}
+          onBlur={e=>{const v=+e.target.value;if(!isNaN(v)&&v>0)onChange(v);else e.target.value=value;e.target.style.borderColor=T.cardBorder;}}
+          onFocus={e=>{e.target.style.borderColor=T.accent;e.target.select();}}
+          style={{width:"100%",padding:"10px 32px 10px 12px",borderRadius:10,border:`1.5px solid ${T.cardBorder}`,fontSize:16,fontWeight:300,color:T.ink,outline:"none",boxSizing:"border-box",background:T.bodyBg,MozAppearance:"textfield"}}/>
+        {u&&<span style={{position:"absolute",right:10,top:"50%",transform:"translateY(-50%)",fontSize:11,color:T.inkLight}}>{u}</span>}
+      </div>
+    );
+  };
+
+  const LabelTxt=({children})=><p style={{fontSize:10,fontWeight:500,color:T.inkLight,textTransform:"uppercase",letterSpacing:"0.1em",margin:"0 0 6px"}}>{children}</p>;
+
+  if(step==="results"&&macros){
+    const totalCals=macros.protein*4+macros.carbs*4+macros.fat*9;
+    const pPct=Math.round(macros.protein*4/totalCals*100);
+    const cPct=Math.round(macros.carbs*4/totalCals*100);
+    const fPct=100-pPct-cPct;
+    const carbsNeg=macros.calories-macros.protein*4-macros.fat*9<0;
+    const derivedCarbs=carbsFrom(macros.calories,macros.protein,macros.fat);
+
+    const MacroCard=({label,hint,pct,grams,calPerG,color,sliderMaxP,sliderMaxG,onPct,onG})=>{
+      const display=editMode==="pct"?pct:grams;
+      const derived=editMode==="pct"?`${grams}g · ${Math.round(grams*calPerG)} kcal`:`${pct}% · ${Math.round(grams*calPerG)} kcal`;
+      return (
+        <div style={{background:T.cardBg,borderRadius:16,padding:"14px 16px",border:`1px solid ${T.cardBorder}`,marginBottom:10}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:8}}>
+            <div>
+              <p style={{fontSize:13,fontWeight:500,color:T.ink,margin:"0 0 1px"}}>{label}</p>
+              <p style={{fontSize:10,fontWeight:400,color:T.inkLight,margin:"0 0 3px"}}>{hint}</p>
+              <p style={{fontSize:11,fontWeight:400,color:color,margin:0}}>{derived}</p>
+            </div>
+            <div style={{display:"flex",alignItems:"baseline",gap:2}}>
+              <NoSpin/>
+              <input type="number" value={display} onChange={e=>editMode==="pct"?onPct(+e.target.value):onG(+e.target.value)}
+                style={{width:editMode==="pct"?50:64,padding:"2px 0",border:"none",borderBottom:`2px solid ${color}`,fontSize:28,fontWeight:300,color:T.ink,background:"transparent",outline:"none",textAlign:"right",MozAppearance:"textfield",letterSpacing:"-0.02em"}}/>
+              <span style={{fontSize:12,fontWeight:400,color:T.inkLight}}>{editMode==="pct"?"%":"g"}</span>
+            </div>
+          </div>
+          <input type="range" min={editMode==="pct"?5:10} max={editMode==="pct"?sliderMaxP:sliderMaxG} step={1} value={display}
+            onChange={e=>editMode==="pct"?onPct(+e.target.value):onG(+e.target.value)}
+            style={{width:"100%",accentColor:color,cursor:"pointer"}}/>
+        </div>
+      );
+    };
+
+    return (
+      <div style={{flex:1,display:"flex",flexDirection:"column"}}>
+        <Header title="Your Targets" subtitle="Edits save automatically · carbs fill the rest" right={
+          <button onClick={()=>setStep("form")} style={{background:T.headerCard,border:`1px solid ${T.headerBorder}`,borderRadius:10,color:T.inkLight,fontSize:11,fontWeight:500,padding:"6px 12px",cursor:"pointer"}}>← Recalc</button>
+        }/>
+        <div style={{flex:1,overflowY:"auto",WebkitOverflowScrolling:"touch",padding:"14px 14px 24px",background:T.bodyBg}}>
+          {/* TDEE banner */}
+          <div style={{background:T.headerBg,borderRadius:16,padding:"14px 16px",marginBottom:12,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <div>
+              <p style={{fontSize:9,color:T.inkLight,textTransform:"uppercase",letterSpacing:"0.1em",margin:"0 0 2px"}}>Your TDEE</p>
+              <p style={{fontSize:26,fontWeight:300,color:T.white,margin:0,letterSpacing:"-0.03em"}}>{macros.tdee}<span style={{fontSize:11,color:T.inkLight,marginLeft:4}}>kcal/day</span></p>
+            </div>
+            <div style={{textAlign:"right"}}>
+              <p style={{fontSize:9,color:T.inkLight,margin:"0 0 2px",textTransform:"uppercase",letterSpacing:"0.08em"}}>Adjustment</p>
+              <p style={{fontSize:14,fontWeight:500,color:GOAL_CONFIGS[goalKey].calAdj>0?T.protein:GOAL_CONFIGS[goalKey].calAdj<0?T.red:T.white,margin:0}}>
+                {GOAL_CONFIGS[goalKey].calAdj>0?"+":""}{GOAL_CONFIGS[goalKey].calAdj} kcal
+              </p>
+            </div>
+          </div>
+
+          {/* Split bar */}
+          <div style={{background:T.cardBg,borderRadius:16,padding:"14px",marginBottom:12,border:`1px solid ${T.cardBorder}`}}>
+            <p style={{fontSize:10,fontWeight:500,color:T.inkLight,textTransform:"uppercase",letterSpacing:"0.1em",margin:"0 0 10px"}}>Live Split</p>
+            <div style={{display:"flex",borderRadius:6,overflow:"hidden",height:10,marginBottom:8}}>
+              <div style={{width:`${pPct}%`,background:T.protein,transition:"width 0.3s ease"}}/>
+              <div style={{width:`${cPct}%`,background:T.carbs,transition:"width 0.3s ease"}}/>
+              <div style={{width:`${fPct}%`,background:T.fat,transition:"width 0.3s ease"}}/>
+            </div>
+            <div style={{display:"flex",justifyContent:"space-between"}}>
+              {[{l:"Protein",p:pPct,c:T.protein},{l:"Carbs",p:cPct,c:T.carbs},{l:"Fat",p:fPct,c:T.fat}].map(m=>(
+                <div key={m.l} style={{display:"flex",alignItems:"center",gap:5}}>
+                  <div style={{width:7,height:7,borderRadius:2,background:m.c}}/>
+                  <span style={{fontSize:11,fontWeight:500,color:T.inkMid}}>{m.l} {m.p}%</span>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Calorie target */}
+          <div style={{background:T.cardBg,borderRadius:16,padding:"14px 16px",border:`1px solid ${T.cardBorder}`,marginBottom:12}}>
+            <div style={{display:"flex",justifyContent:"space-between",marginBottom:8}}>
+              <p style={{fontSize:10,fontWeight:500,color:T.inkLight,textTransform:"uppercase",letterSpacing:"0.1em",margin:0}}>Daily Calories</p>
+              <p style={{fontSize:10,color:T.inkLight,margin:0}}>Tap to edit</p>
+            </div>
+            <div style={{display:"flex",alignItems:"center",gap:10}}>
+              <NoSpin/>
+              <input type="number" value={macros.calories||""} onChange={e=>{const r=e.target.value===""?0:+e.target.value;setMacros(p=>({...p,calories:r,carbs:carbsFrom(r,p.protein,p.fat)}));}}
+                onBlur={e=>{const v=+e.target.value;if(v>0){setMacros(p=>({...p,calories:v,carbs:carbsFrom(v,p.protein,p.fat)}));}else{e.target.value=macros.calories;}}}
+                onFocus={e=>e.target.select()}
+                style={{width:`${String(macros.calories||"").length+1}ch`,minWidth:"3ch",maxWidth:"100%",padding:"4px 0",border:"none",borderBottom:`2px solid ${T.accent}`,fontSize:30,fontWeight:300,color:T.ink,background:"transparent",outline:"none",MozAppearance:"textfield",letterSpacing:"-0.03em"}}/>
+              <span style={{fontSize:13,fontWeight:400,color:T.inkLight,flexShrink:0}}>kcal / day</span>
+            </div>
+          </div>
+
+          {/* Mode toggle */}
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+            <p style={{fontSize:10,fontWeight:500,color:T.inkLight,textTransform:"uppercase",letterSpacing:"0.1em",margin:0}}>Macro Targets</p>
+            <div style={{display:"flex",background:T.cardBg,borderRadius:8,padding:2,gap:2,border:`1px solid ${T.cardBorder}`}}>
+              {[{v:"pct",l:"By %"},{v:"grams",l:"By g"}].map(o=>(
+                <button key={o.v} onClick={()=>setEditMode(o.v)} style={{padding:"4px 10px",borderRadius:6,border:"none",cursor:"pointer",fontSize:11,fontWeight:editMode===o.v?600:400,background:editMode===o.v?T.accent:T.cardBg,color:editMode===o.v?T.white:T.inkLight,transition:"all 0.2s"}}>{o.l}</button>
+              ))}
+            </div>
+          </div>
+          <p style={{fontSize:11,color:T.inkLight,margin:"0 0 10px",lineHeight:1.5}}>
+            {editMode==="pct"?"Adjust protein & fat % — carbs auto-fill to hit your calorie goal.":"Enter exact grams — carbs auto-fill the remaining calories."}
+          </p>
+
+          <MacroCard label="Protein" hint="Builds & repairs muscle" pct={pPct} grams={macros.protein} calPerG={4} color={T.protein} sliderMaxP={70} sliderMaxG={400} onPct={handleProteinPct} onG={handleProteinG}/>
+          <MacroCard label="Fat" hint="Hormones & absorption" pct={fPct} grams={macros.fat} calPerG={9} color={T.fat} sliderMaxP={60} sliderMaxG={200} onPct={handleFatPct} onG={handleFatG}/>
+
+          {/* Carbs AUTO card */}
+          <div style={{background:carbsNeg?"#FEE8E8":T.cardBg,borderRadius:16,padding:"14px 16px",border:`1px solid ${carbsNeg?"#FCA5A5":T.cardBorder}`,marginBottom:12}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+              <div>
+                <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:2}}>
+                  <p style={{fontSize:13,fontWeight:500,color:carbsNeg?T.red:T.ink,margin:0}}>Carbs</p>
+                  <span style={{fontSize:9,fontWeight:600,background:carbsNeg?"#FCA5A5":"#FFF8E6",color:carbsNeg?T.red:T.carbs,padding:"1px 7px",borderRadius:20,letterSpacing:"0.06em"}}>AUTO</span>
+                </div>
+                <p style={{fontSize:11,color:carbsNeg?T.red:T.carbs,margin:0}}>
+                  {carbsNeg?"⚠ Protein + fat exceed goal":`${editMode==="pct"?`${derivedCarbs}g · `:""}${Math.round(derivedCarbs*4)} kcal`}
+                </p>
+              </div>
+              <div style={{display:"flex",alignItems:"baseline",gap:2,opacity:carbsNeg?.4:1}}>
+                <span style={{fontSize:28,fontWeight:300,color:carbsNeg?T.red:T.carbs,letterSpacing:"-0.02em"}}>
+                  {carbsNeg?0:editMode==="pct"?cPct:derivedCarbs}
+                </span>
+                <span style={{fontSize:12,color:carbsNeg?T.red:T.carbs,opacity:.7}}>{editMode==="pct"?"%":"g"}</span>
+              </div>
+            </div>
+          </div>
+
+          <div style={{padding:"8px 12px",borderRadius:12,background:carbsNeg?"#FEE8E8":"#E6FBF5",border:`1px solid ${carbsNeg?"#FCA5A5":"#A7F3D0"}`,display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
+            <span style={{fontSize:12,fontWeight:500,color:carbsNeg?T.red:T.protein}}>{carbsNeg?"⚠ Over goal — reduce protein or fat":`✓ ${macros.protein*4+derivedCarbs*4+macros.fat*9} kcal — goal met`}</span>
+            <span style={{fontSize:12,fontWeight:600,color:carbsNeg?T.red:T.protein}}>{macros.calories} kcal</span>
+          </div>
+
+          {/* Profile recap */}
+          <div style={{background:T.cardBg,borderRadius:16,padding:"14px",border:`1px solid ${T.cardBorder}`}}>
+            <p style={{fontSize:10,fontWeight:500,color:T.inkLight,textTransform:"uppercase",letterSpacing:"0.1em",margin:"0 0 10px"}}>Based on your profile</p>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+              {[{l:"Sex",v:sex==="male"?"Male":"Female"},{l:"Age",v:`${age} yrs`},{l:"Weight",v:unit==="imperial"?`${wLbs} lbs`:`${wKg} kg`},{l:"Height",v:unit==="imperial"?`${hFt}'${hIn}"`:`${hCm} cm`},{l:"Activity",v:ACTIVITY[activity].label},{l:"Goal",v:GOAL_CONFIGS[goalKey].label}].map(i=>(
+                <div key={i.l} style={{background:T.bodyBg,borderRadius:10,padding:"8px 10px"}}>
+                  <p style={{fontSize:10,color:T.inkLight,margin:"0 0 2px"}}>{i.l}</p>
+                  <p style={{fontSize:12,fontWeight:500,color:T.ink,margin:0}}>{i.v}</p>
+                </div>
+              ))}
+            </div>
+            <button onClick={()=>setStep("form")} style={{marginTop:10,width:"100%",padding:"9px",borderRadius:10,border:`1px solid ${T.cardBorder}`,background:"none",color:T.inkMid,fontSize:12,fontWeight:500,cursor:"pointer"}}>Edit Profile</button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
+      <Header title="Set Your Goals" subtitle="We'll calculate your ideal macros"/>
+      <div style={{flex:1,overflowY:"auto",WebkitOverflowScrolling:"touch",padding:"14px 14px 24px",background:T.bodyBg}}>
+        <div style={{marginBottom:16}}><Seg opts={[{v:"imperial",l:"Imperial (lbs, ft)"},{v:"metric",l:"Metric (kg, cm)"}]} val={unit} onChange={setUnit}/></div>
+        <div style={{marginBottom:14}}><LabelTxt>Biological Sex</LabelTxt><Seg opts={[{v:"male",l:"♂ Male"},{v:"female",l:"♀ Female"}]} val={sex} onChange={setSex}/></div>
+        <div style={{marginBottom:14}}><LabelTxt>Age</LabelTxt><NumInput value={age} onChange={setAge} unit="yrs"/></div>
+        <div style={{marginBottom:14}}><LabelTxt>Current Weight</LabelTxt>{unit==="imperial"?<NumInput value={wLbs} onChange={setWLbs} unit="lbs"/>:<NumInput value={wKg} onChange={setWKg} unit="kg"/>}</div>
+        <div style={{marginBottom:14}}><LabelTxt>Height</LabelTxt>{unit==="imperial"?<div style={{display:"flex",gap:8}}><NumInput value={hFt} onChange={setHFt} unit="ft"/><NumInput value={hIn} onChange={setHIn} unit="in"/></div>:<NumInput value={hCm} onChange={setHCm} unit="cm"/>}</div>
+        <div style={{marginBottom:14}}>
+          <LabelTxt>Activity Level</LabelTxt>
+          {Object.entries(ACTIVITY).map(([k,a])=>(
+            <button key={k} onClick={()=>setActivity(k)} style={{display:"flex",justifyContent:"space-between",alignItems:"center",width:"100%",padding:"11px 14px",borderRadius:12,cursor:"pointer",textAlign:"left",border:activity===k?`2px solid ${T.accent}`:`1px solid ${T.cardBorder}`,background:activity===k?T.accentSoft:T.cardBg,transition:"all 0.2s",marginBottom:7}}>
+              <div><div style={{fontSize:13,fontWeight:500,color:activity===k?T.accent:T.ink}}>{a.label}</div><div style={{fontSize:11,color:activity===k?T.accent:T.inkLight,opacity:.8,marginTop:1}}>{a.desc}</div></div>
+              <div style={{width:18,height:18,borderRadius:"50%",border:activity===k?"none":`2px solid ${T.inkFaint}`,background:activity===k?T.accent:"transparent",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>
+                {activity===k&&<span style={{fontSize:10,color:T.white,fontWeight:700}}>✓</span>}
+              </div>
+            </button>
+          ))}
+        </div>
+        <div style={{marginBottom:24}}>
+          <LabelTxt>Your Goal</LabelTxt>
+          {Object.entries(GOAL_CONFIGS).map(([k,g])=>{
+            const isL=k.startsWith("lose"),isG=k.startsWith("gain");
+            const ac=isL?T.fat:isG?T.protein:T.carbs;
+            return (
+              <button key={k} onClick={()=>setGoalKey(k)} style={{display:"flex",justifyContent:"space-between",alignItems:"center",width:"100%",padding:"11px 14px",borderRadius:12,cursor:"pointer",textAlign:"left",border:goalKey===k?`2px solid ${ac}`:`1px solid ${T.cardBorder}`,background:goalKey===k?T.accentSoft:T.cardBg,transition:"all 0.2s",marginBottom:7}}>
+                <div><div style={{fontSize:13,fontWeight:500,color:goalKey===k?ac:T.ink}}>{g.label}</div><div style={{fontSize:11,color:goalKey===k?ac:T.inkLight,opacity:.8,marginTop:1}}>{g.desc}</div></div>
+                <div style={{width:18,height:18,borderRadius:"50%",border:goalKey===k?"none":`2px solid ${T.inkFaint}`,background:goalKey===k?ac:"transparent",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>
+                  {goalKey===k&&<span style={{fontSize:10,color:T.white,fontWeight:700}}>✓</span>}
+                </div>
+              </button>
+            );
+          })}
+        </div>
+        <button onClick={calculate} style={{width:"100%",padding:"15px",borderRadius:14,border:"none",background:T.accent,color:T.white,fontSize:15,fontWeight:600,cursor:"pointer",boxShadow:`0 6px 20px ${T.accent}33`,letterSpacing:"-0.01em"}}>
+          Calculate My Macros →
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ── Root app ──────────────────────────────────────────────────────────────────
+// ── localStorage helpers ─────────────────────────────────────────────────────
+const STORAGE_KEY = "macman_data";
+function getTodayKey() { return new Date().toISOString().slice(0,10); }
+
+function loadMeals() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return null;
+    const data = JSON.parse(raw);
+    if (data.date === getTodayKey()) return data.meals;
+  } catch(e) {}
+  return null;
+}
+function saveMeals(meals) {
+  try { localStorage.setItem(STORAGE_KEY, JSON.stringify({ date: getTodayKey(), meals })); } catch(e) {}
+}
+
+function MacmanApp() {
+  const [tab,setTab]=useState("today");
+  const [meals,setMeals]=useState(()=>loadMeals()||INITIAL_ENTRIES);
+
+  // Persist meals to localStorage on every change
+  useEffect(()=>{ saveMeals(meals); },[meals]);
+
+  const screens={
+    today: <TodayScreen meals={meals} setMeals={setMeals} onNavigateLog={()=>setTab("log")}/>,
+    log:   <LogScreen meals={meals} setMeals={setMeals}/>,
+    trends:<TrendsScreen/>,
+    goals: <GoalsScreen/>,
+  };
+
+  const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+  return (
+    <div style={{
+      height: isMobile ? "100dvh" : "100vh",
+      background: isMobile ? T.bodyBg : "#272B2A",
+      display: "flex",
+      alignItems: isMobile ? "stretch" : "center",
+      justifyContent: "center",
+      padding: isMobile ? 0 : "40px 20px",
+      overflow: "hidden",
+    }}>
+      <link href="https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,300;9..40,400;9..40,500;9..40,600;9..40,700&display=swap" rel="stylesheet"/>
+      <style>{`
+        *{-webkit-font-smoothing:antialiased;box-sizing:border-box;font-family:'DM Sans',sans-serif;}
+        html,body{height:100%;overflow:hidden;}
+      `}</style>
+      <div style={{
+        width: isMobile ? "100%" : 375,
+        background: T.bodyBg,
+        borderRadius: isMobile ? 0 : 44,
+        boxShadow: isMobile ? "none" : "0 40px 100px rgba(0,0,0,0.5), 0 0 0 1px #3A3F3E",
+        display: "flex",
+        flexDirection: "column",
+        height: isMobile ? "100%" : "90vh",
+        overflow: "hidden",
+      }}>
+        {/* Status bar — hide on real phone, it has its own */}
+        {!isMobile && (
+          <div style={{background:T.headerBg,padding:"14px 22px 0",display:"flex",justifyContent:"space-between",flexShrink:0}}>
+            <span style={{fontSize:11,fontWeight:500,color:T.inkLight}}>9:41</span>
+            <span style={{fontSize:10,color:T.inkLight}}>●●● 🔋</span>
+          </div>
+        )}
+        {/* Screen content */}
+        <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
+          {screens[tab]}
+        </div>
+        {/* Nav */}
+        <BottomNav active={tab} onNav={setTab}/>
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(MacmanApp));
+  </script>
+</body>
+</html>
